@@ -2,114 +2,127 @@ import React, { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, TextInput, Button, FlatList, Alert, TouchableOpacity, ScrollView } from 'react-native';
 import AntDesign from 'react-native-vector-icons/AntDesign';
 import { Picker } from '@react-native-picker/picker';
-import { getDatabase, ref, onValue, update, off, get,push } from 'firebase/database';
+import { getDatabase, ref, onValue, update, off, get, push } from 'firebase/database';
 import { primary } from '../color';
 
 const ManageInvestments = ({ navigation }) => {
-  // State to store the selected plan level and entered amount
   const [selectedPlanLevel, setSelectedPlanLevel] = useState('Select Plan');
   const [amount, setAmount] = useState('');
   const [eligibleUsers, setEligibleUsers] = useState([]);
   const [users, setUsers] = useState([]);
-  const [percentage, setPercentage] = useState('')
+  const [percentage, setPercentage] = useState('');
+  const [excludedUsers, setExcludedUsers] = useState([]);
   const db = getDatabase();
 
-  // Fetch user data from Firebase Realtime Database
   useEffect(() => {
     const usersRef = ref(db, 'users');
     onValue(usersRef, (snapshot) => {
       const data = snapshot.val();
 
       if (data) {
-        // Convert the data into an array of user objects
-        const userList = Object.keys(data).map((username) => {
-          return {
+        const userList = Object.keys(data)
+          .map((username) => ({
             username,
             ...data[username],
-          };
-        });
+          }))
+          .filter((user) => !user.isBlocked);
+
         setUsers(userList);
       } else {
-        console.log('no Data')
+        console.log('no Data');
       }
     });
   }, [db]);
 
-  // Function to calculate the distributed amount for each user
-  const calculateDistributedAmount = () => {
+  // const toggleUserExclusion = (username) => {
+  //   if (excludedUsers.includes(username)) {
+  //     setExcludedUsers((prevExcludedUsers) => prevExcludedUsers.filter((user) => user !== username));
+  //   } else {
+  //     setExcludedUsers((prevExcludedUsers) => [...prevExcludedUsers, username]);
+  //   }
+  //   // Call calculateDistributedAmount to update the list of eligible users
+  //   calculateDistributedAmount();
+  // };
+  const toggleUserExclusion = (username) => {
+    console.log(username)
+    // Check if the user is already excluded
+    if (excludedUsers.includes(username)) {
 
+    } else {
+      // User is not excluded, so add them to the excluded users list
+      setExcludedUsers((prevExcludedUsers) => [...prevExcludedUsers, username]);
+      Alert.alert('Press the Exclude Button again to remove user from Profit Distribution')
+    }
+    // Call calculateDistributedAmount to update the list of eligible users
+    calculateDistributedAmount();
+  };
+  const calculateDistributedAmount = () => {
     if (selectedPlanLevel === 'Select Plan') {
       Alert.alert('Please Select a Plan');
     } else if (amount === '' || percentage === '') {
-      Alert.alert('Please Enter an Amount to Distribute and percentage for agents');
+      Alert.alert('Please Enter an Amount to Distribute and a Percentage for agents');
     } else {
       const distributionAmount = parseFloat(amount);
-      console.log('distrubuted amount', distributionAmount, 'selected Plan', selectedPlanLevel)
-      // Filter users based on the selected plan level
-      const filteredUsers = users.filter((user) => user.plan === parseInt(selectedPlanLevel));
-      console.log(filteredUsers)
+      const filteredUsers = users.filter((user) => parseFloat(user.plan) === parseInt(selectedPlanLevel));
+
       if (filteredUsers.length === 0) {
-        // No eligible users
         setEligibleUsers([]);
         return;
       }
 
-      // Calculate the user share
-      const userShare = distributionAmount / filteredUsers.length;
+      // Filter out the excluded users
+      const eligibleUsersAfterExclusion = filteredUsers.filter((user) => !excludedUsers.includes(user.username));
 
-      // Calculate and set the distributed amount for each user
-      const usersWithDistributedAmount = filteredUsers.map((user) => {
-        const referralBonus = user.referredBy ? 0.1 * userShare : 0; // 10% referral bonus
+      if (eligibleUsersAfterExclusion.length === 0) {
+        setEligibleUsers([]);
+        return;
+      }
+
+      const userShare = (distributionAmount / eligibleUsersAfterExclusion.length).toFixed(2);
+      const usersWithDistributedAmount = eligibleUsersAfterExclusion.map((user) => {
+        const referralBonus = user.referredBy ? (0.1 * userShare).toFixed(2) : 0;
         return {
           ...user,
           distributedAmount: userShare,
-          parentRefferal: referralBonus
+          parentRefferal: referralBonus,
+          isExcluded: excludedUsers.includes(user.username),
         };
       });
 
-      // Set the eligible users for rendering
       setEligibleUsers(usersWithDistributedAmount);
     }
   };
 
+
   const handleConfirm = async () => {
-    const percent = percentage/100
-    console.log('Percentage', percent)
+    const percent = percentage / 100;
     try {
-      const updates = {};  
-      const timestamp = new Date().toISOString();                                                                               
-      // Step 1: Update the user's balance in Firebase
+      const updates = {};
+      const timestamp = new Date().toISOString();
       eligibleUsers.forEach((user) => {
         const distributedAmount = parseFloat(user.distributedAmount);
         const remainingAmount = parseFloat(distributedAmount);
         const earnedAmount = parseFloat(user?.earned || 0);
-        // Update the balance field in Firebase
-        const newBalance = parseFloat(user.balance) + remainingAmount; // Add both earned and referral bonuses
+        const newBalance = parseFloat(user.balance) + remainingAmount;
         updates[`users/${user.username}/balance`] = newBalance;
         updates[`users/${user.username}/earned`] = earnedAmount + remainingAmount;
         const distributionEntry = {
           amount: remainingAmount,
-          Type:'Earning',
-          date: new Date(timestamp).toLocaleDateString(), // Format the date as desired
-          time: new Date(timestamp).toLocaleTimeString(), // Format the time as desired
+          Type: 'Earning',
+          date: new Date(timestamp).toLocaleDateString(),
+          time: new Date(timestamp).toLocaleTimeString(),
         };
-  
-        // Push the distribution entry to the user's history
         const userHistoryRef = ref(db, `users/${user.username}/history`);
         push(userHistoryRef, distributionEntry);
       });
 
-      // Perform the batch update for balance in Firebase
       await update(ref(db), updates);
 
-      // Step 2: Fetch the updated user data from Firebase
       const snapshot = await get(ref(db, 'users'));
       const usersData = snapshot.val() || {};
 
-      // Step 3: Calculate and distribute profits to referred users
       const referralGroups = {};
       eligibleUsers.forEach((user) => {
-        // Group eligible users by their referrer
         if (user.referredBy) {
           if (!referralGroups[user.referredBy]) {
             referralGroups[user.referredBy] = [];
@@ -118,41 +131,34 @@ const ManageInvestments = ({ navigation }) => {
         }
       });
 
-      // Step 4: Update referral earnings for referrers and calculate total referral bonuses
       for (const referrerUsername in referralGroups) {
         if (referralGroups.hasOwnProperty(referrerUsername)) {
           const referredUsers = referralGroups[referrerUsername];
           const totalReferralBonus = referredUsers.reduce((total, referredUser) => {
             return total + (percent * parseFloat(referredUser.distributedAmount));
           }, 0);
-          if(usersData[referrerUsername]?.isAgent === true){
-          // Calculate the updated balance for the referrer, including referral bonuses
-          const referrerBalance = parseFloat(usersData[referrerUsername]?.balance || 0);
-          const newReferrerBalance = parseFloat(referrerBalance + totalReferralBonus);
-          const reffererEarningByRefferal = parseFloat(usersData[referrerUsername]?.refferalEarning || 0)
-          // Update the balance and referral earnings for this referrer
-          updates[`users/${referrerUsername}/balance`] = newReferrerBalance;
-          updates[`users/${referrerUsername}/refferalEarning`] = totalReferralBonus + reffererEarningByRefferal; // Update referral earnings
-          const distributionEntry = {
-            amount: totalReferralBonus,
-            Type:'Refferal Bonus',
-            date: new Date(timestamp).toLocaleDateString(), // Format the date as desired
-            time: new Date(timestamp).toLocaleTimeString(), // Format the time as desired
-          };
-    
-          // Push the distribution entry to the user's history
-          const userHistoryRef = ref(db, `users/${referrerUsername}/history`);
-          push(userHistoryRef, distributionEntry);
-        }
+          if (usersData[referrerUsername]?.isAgent === true) {
+            const referrerBalance = parseFloat(usersData[referrerUsername]?.balance || 0);
+            const newReferrerBalance = parseFloat(referrerBalance + totalReferralBonus);
+            const reffererEarningByRefferal = parseFloat(usersData[referrerUsername]?.refferalEarning || 0);
+            updates[`users/${referrerUsername}/balance`] = newReferrerBalance;
+            updates[`users/${referrerUsername}/refferalEarning`] = totalReferralBonus + reffererEarningByRefferal;
+            const distributionEntry = {
+              amount: totalReferralBonus,
+              Type: 'Refferal Bonus',
+              date: new Date(timestamp).toLocaleDateString(),
+              time: new Date(timestamp).toLocaleTimeString(),
+            };
+            const userHistoryRef = ref(db, `users/${referrerUsername}/history`);
+            push(userHistoryRef, distributionEntry);
+          }
         }
       }
 
-      // Step 5: Perform the final batch update for referral earnings and balance in Firebase
       await update(ref(db), updates);
 
-      // Step 6: Clear state and show success message
-      setSelectedPlanLevel();
-      setAmount();
+      setSelectedPlanLevel('Select Plan');
+      setAmount('');
       setEligibleUsers([]);
       Alert.alert('Distributed successfully');
     } catch (error) {
@@ -194,7 +200,7 @@ const ManageInvestments = ({ navigation }) => {
         value={amount}
         onChangeText={(text) => setAmount(text)}
       />
-       <Text style={styles.label}>Enter Percentage for agents:</Text>
+      <Text style={styles.label}>Enter Percentage for agents:</Text>
       <TextInput
         style={styles.input}
         placeholder="%"
@@ -205,37 +211,39 @@ const ManageInvestments = ({ navigation }) => {
 
       <Button title="Calculate Distributed Amount" onPress={calculateDistributedAmount} color={primary} />
 
-
       {eligibleUsers.length === 0 ? (
         <View style={{ justifyContent: 'center', alignItems: 'center', flex: 1 }}>
           <Text>No eligible users for the selected plan level</Text>
         </View>
-
       ) : (
-        <View>
-          <FlatList
-            data={eligibleUsers}
-            keyExtractor={(item) => item.username}
-            renderItem={({ item }) => (
-              <View style={styles.userItem}>
+        <>
+        <FlatList
+          data={eligibleUsers}
+          vertical
+          keyExtractor={(item) => item.username}
+          renderItem={({ item }) => (
+            <View style={styles.userItem}>
+              <View>
                 <Text>{`Id: ${item.username || 'N/A'}`}</Text>
                 <Text>{`User: ${item.name || 'N/A'}`}</Text>
                 <Text>{`Plan Level: $${item.plan || 'N/A'}`}</Text>
                 <Text>{`Referred By: ${item.referredBy || 'None'}`}</Text>
                 <Text>{`Distributed Amount: $${item.distributedAmount || 'N/A'}`}</Text>
-                
               </View>
-            )}
-          />
-          <TouchableOpacity style={{ backgroundColor: primary, paddingVertical: 15, borderRadius: 10, alignItems: 'center' }} onPress={handleConfirm}>
+              <TouchableOpacity onPress={() => { toggleUserExclusion(item.username); }} style={{ backgroundColor: '#da2c38', alignItems: 'center', justifyContent: 'center', marginVertical: 20, paddingHorizontal: 5, marginLeft: 5, borderRadius: 10 }}>
+                <Text style={{ color: 'white' }}>
+                  Exclude
+                </Text>
+              </TouchableOpacity>
+            </View>
+          )} /><TouchableOpacity style={{ backgroundColor: primary, paddingVertical: 15, borderRadius: 10, alignItems: 'center', }} onPress={handleConfirm}>
             <Text style={{ color: '#fff', fontWeight: '500', fontSize: 18 }}>
               Confirm
             </Text>
           </TouchableOpacity>
-        </View>
+          </>
+
       )}
-
-
     </View>
   );
 };
@@ -264,6 +272,8 @@ const styles = StyleSheet.create({
     padding: 10,
     marginBottom: 10,
     borderRadius: 5,
+    flexDirection: 'row',
+    justifyContent: 'space-between'
   },
 });
 
